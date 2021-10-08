@@ -2553,4 +2553,12 @@ cpp<#
   (:serialize (:slk))
   (:clone))
 
+(lcp:define-class version-query (query) ()
+  (:public
+    #>cpp
+    DEFVISITABLE(QueryVisitor<void>);
+    cpp<#)
+  (:serialize (:slk))
+  (:clone))
+
 (lcp:pop-namespace) ;; namespace query

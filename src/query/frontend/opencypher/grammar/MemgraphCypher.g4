@@ -90,6 +90,7 @@ memgraphCypherKeyword : cypherKeyword
                       | UPDATE
                       | USER
                       | USERS
+                      | VERSION
                       ;
 
 symbolicName : UnescapedSymbolicName
@@ -113,6 +114,7 @@ query : cypherQuery
       | createSnapshotQuery
       | streamQuery
       | settingQuery
+      | versionQuery
       ;
 
 authQuery : createRole
@@ -325,3 +327,5 @@ setSetting : SET DATABASE SETTING settingName TO settingValue ;
 showSetting : SHOW DATABASE SETTING settingName ;
 
 showSettings : SHOW DATABASE SETTINGS ;
+
+versionQuery : SHOW VERSION ;
