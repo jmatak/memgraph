@@ -1,3 +1,14 @@
+// Copyright 2021 Memgraph Ltd.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt; by using this file, you agree to be bound by the terms of the Business Source
+// License, and you may not use this file except in compliance with the Business Source License.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+//
 #include <chrono>
 #include <optional>
 #include <string>
@@ -45,7 +56,8 @@ struct ConsumerTest : public ::testing::Test {
     };
   };
 
-  std::unique_ptr<Consumer> CreateConsumer(ConsumerInfo &&info, ConsumerFunction consumer_function) {
+  std::unique_ptr<Consumer> CreateConsumer(ConsumerInfo &&info, ConsumerFunction consumer_function,
+                                           size_t *maybe_set_offset = nullptr) {
     EXPECT_EQ(1, info.topics.size());
     EXPECT_EQ(info.topics.at(0), kTopicName);
     auto last_received_message = std::make_shared<std::atomic<int>>(0);
@@ -89,6 +101,9 @@ struct ConsumerTest : public ::testing::Test {
 
     consumer->Stop();
     std::this_thread::sleep_for(std::chrono::seconds(4));
+    if (maybe_set_offset) {
+      *maybe_set_offset = sent_messages;
+    }
     return consumer;
   }
 
@@ -482,4 +497,60 @@ TEST_F(ConsumerTest, ConsumerStatus) {
   check_info(consumer.Info());
   consumer.StopIfRunning();
   check_info(consumer.Info());
+}
+
+TEST_F(ConsumerTest, SetOffset) {
+  constexpr auto kBatchInterval = std::chrono::milliseconds{1000};
+  constexpr auto kBatchSize = 3;
+  auto info = CreateDefaultConsumerInfo();
+  info.batch_interval = kBatchInterval;
+  info.batch_size = kBatchSize;
+  constexpr std::string_view kMessage = "SetOffsetTest";
+  std::vector<std::string> messages_received;
+  std::vector<std::string> expected_messages_received;
+  auto consumer_function = [&](const std::vector<Message> &messages) mutable {
+    for (const auto &message : messages) {
+      messages_received.push_back(std::string(message.Payload().data(), message.Payload().size()));
+      spdlog::info("Message Received {}", messages_received.back());
+    }
+  };
+
+  size_t msgs{0};
+  auto consumer = CreateConsumer(std::move(info), std::move(consumer_function), &msgs);
+
+  constexpr auto kLastBatchMessageCount = 1;
+  constexpr auto kMessageCount = 3 * kBatchSize + kLastBatchMessageCount;
+  for (auto sent_messages = 0; sent_messages < kMessageCount; ++sent_messages) {
+    auto message = fmt::format("{}, {}", sent_messages, kMessage);
+    cluster.SeedTopic(kTopicName, std::string_view(message));
+    expected_messages_received.push_back(std::move(message));
+  }
+  consumer->SetConsumerOffsets("Test stream", msgs);
+  std::this_thread::sleep_for(kBatchInterval * 2);
+  messages_received.clear();
+  consumer->Start();
+  EXPECT_TRUE(!consumer->SetConsumerOffsets("Test Stream", 100).empty());
+  std::this_thread::sleep_for(kBatchInterval * 2);
+  cluster.SeedTopic(kTopicName, std::string_view{"final message"});
+  expected_messages_received.push_back("final message");
+  std::this_thread::sleep_for(kBatchInterval * 2);
+  consumer->Stop();
+  EXPECT_EQ(expected_messages_received.size(), messages_received.size());
+  EXPECT_TRUE(
+      std::equal(expected_messages_received.begin(), expected_messages_received.end(), messages_received.begin()));
+
+  consumer->SetConsumerOffsets("Test stream", -1);
+  messages_received.clear();
+  consumer->Start();
+  const auto total_msgs = msgs + kMessageCount + 1;
+  std::this_thread::sleep_for(kBatchInterval * total_msgs);
+  consumer->Stop();
+  EXPECT_EQ(messages_received.size(), total_msgs);
+
+  consumer->SetConsumerOffsets("Test stream", -2);
+  messages_received.clear();
+  consumer->Start();
+  std::this_thread::sleep_for(kBatchInterval * total_msgs);
+  consumer->Stop();
+  EXPECT_EQ(messages_received.size(), 0);
 }
