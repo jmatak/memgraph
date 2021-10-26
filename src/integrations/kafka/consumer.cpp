@@ -112,9 +112,7 @@ int64_t Message::Timestamp() const {
 }
 
 Consumer::Consumer(const std::string &bootstrap_servers, ConsumerInfo info, ConsumerFunction consumer_function)
-    : info_{std::move(info)},
-      consumer_function_(std::move(consumer_function)),
-      cb_(&last_assignment_, info_.consumer_name, &opt_) {
+    : info_{std::move(info)}, consumer_function_(std::move(consumer_function)), cb_(info_.consumer_name) {
   MG_ASSERT(consumer_function_, "Empty consumer function for Kafka consumer");
   // NOLINTNEXTLINE (modernize-use-nullptr)
   if (info.batch_interval.value_or(kMinimumInterval) < kMinimumInterval) {
@@ -232,67 +230,12 @@ void Consumer::StopIfRunning() {
 
 void Consumer::Check(std::optional<std::chrono::milliseconds> timeout, std::optional<int64_t> limit_batches,
                      const ConsumerFunction &check_consumer_function) const {
-  // NOLINTNEXTLINE (modernize-use-nullptr)
-  if (timeout.value_or(kMinimumInterval) < kMinimumInterval) {
-    throw ConsumerCheckFailedException(info_.consumer_name, "Timeout has to be positive!");
-  }
-  if (limit_batches.value_or(kMinimumSize) < kMinimumSize) {
-    throw ConsumerCheckFailedException(info_.consumer_name, "Batch limit has to be positive!");
-  }
-  // The implementation of this function is questionable: it is const qualified, though it changes the inner state of
-  // KafkaConsumer. Though it changes the inner state, it saves the current assignment for future Check/Start calls to
-  // restore the current state, so the changes made by this function shouldn't be visible for the users of the class. It
-  // also passes a non const reference of KafkaConsumer to GetBatch function. That means the object is bitwise const
-  // (KafkaConsumer is stored in unique_ptr) and internally mostly synchronized. Mostly, because as Start/Stop requires
-  // exclusive access to consumer, so we don't have to deal with simultaneous calls to those functions. The only concern
-  // in this function is to prevent executing this function on multiple threads simultaneously.
   if (is_running_.exchange(true)) {
     throw ConsumerRunningException(info_.consumer_name);
   }
   utils::OnScopeExit restore_is_running([this] { is_running_.store(false); });
 
-  if (last_assignment_.empty()) {
-    if (const auto err = consumer_->assignment(last_assignment_); err != RdKafka::ERR_NO_ERROR) {
-      spdlog::warn("Saving the commited offset of consumer {} failed: {}", info_.consumer_name, RdKafka::err2str(err));
-      throw ConsumerCheckFailedException(info_.consumer_name,
-                                         fmt::format("Couldn't save commited offsets: '{}'", RdKafka::err2str(err)));
-    }
-  } else {
-    if (const auto err = consumer_->assign(last_assignment_); err != RdKafka::ERR_NO_ERROR) {
-      throw ConsumerCheckFailedException(info_.consumer_name,
-                                         fmt::format("Couldn't restore commited offsets: '{}'", RdKafka::err2str(err)));
-    }
-  }
-
-  const auto num_of_batches = limit_batches.value_or(kDefaultCheckBatchLimit);
-  const auto timeout_to_use = timeout.value_or(kDefaultCheckTimeout);
-  const auto start = std::chrono::steady_clock::now();
-  for (int64_t i = 0; i < num_of_batches;) {
-    const auto now = std::chrono::steady_clock::now();
-    // NOLINTNEXTLINE (modernize-use-nullptr)
-    if (now - start >= timeout_to_use) {
-      throw ConsumerCheckFailedException(info_.consumer_name, "timeout reached");
-    }
-    auto maybe_batch = GetBatch(*consumer_, info_, is_running_);
-
-    if (maybe_batch.HasError()) {
-      throw ConsumerCheckFailedException(info_.consumer_name, maybe_batch.GetError());
-    }
-
-    const auto &batch = maybe_batch.GetValue();
-
-    if (batch.second.empty()) {
-      continue;
-    }
-    ++i;
-
-    try {
-      check_consumer_function(batch.second);
-    } catch (const std::exception &e) {
-      spdlog::warn("Kafka consumer {} check failed with error {}", info_.consumer_name, e.what());
-      throw ConsumerCheckFailedException(info_.consumer_name, e.what());
-    }
-  }
+  const_cast<Consumer *>(this)->SetConsumerOffsets(info_.consumer_name, limit_batches.value_or(-1));
 }
 
 bool Consumer::IsRunning() const { return is_running_; }
@@ -368,8 +311,12 @@ void Consumer::StartConsuming() {
 
         if (const auto err = consumer_->commitSync(partitions); err != RdKafka::ERR_NO_ERROR) {
           spdlog::warn("Committing offset of consumer {} failed: {}", info_.consumer_name, RdKafka::err2str(err));
+          RdKafka::TopicPartition::destroy(partitions);
           break;
         }
+        spdlog::info("Committing offset of consumer {} succeeded with offset {}", info_.consumer_name,
+                     partitions.at(0)->offset());
+        RdKafka::TopicPartition::destroy(partitions);
       } catch (const std::exception &e) {
         spdlog::warn("Error happened in consumer {} while processing a batch: {}!", info_.consumer_name, e.what());
         break;
@@ -386,47 +333,15 @@ void Consumer::StopConsuming() {
 }
 
 std::string Consumer::SetConsumerOffsets(const std::string_view stream_name, int64_t offset) {
-  /*
-bool expected{false};
-if (!is_running_.compare_exchange_strong(expected, true)) {
-return fmt::format("Can't set offset of running Stream: {}", stream_name);
-}
-*/
-  if (offset == -1) {
-    offset = RD_KAFKA_OFFSET_BEGINNING;
-  } else if (offset == -2) {
-    offset = RD_KAFKA_OFFSET_END;
-  }
-  if (!opt_) {
-    // try consume instead of returning
-    return "Failed";
-  }
-  /*
-    cb_.set_offset(offset);
-    if (const auto err = consumer_->subscribe(info_.topics); err != RdKafka::ERR_NO_ERROR) {
-      return fmt::format("Could not set offset of consumer: {}. Error: {}", info_.consumer_name, RdKafka::err2str(err));
-    }
-    */
-  //  utils::OnScopeExit is_running_raii([&run = is_running_]() { run.store(false); });
-  auto &partitions = *opt_;
-
   if (offset == -1) {
     offset = RD_KAFKA_OFFSET_BEGINNING;
   } else if (offset == -2) {
     offset = RD_KAFKA_OFFSET_END;
   }
 
-  for (auto &partition : partitions) {
-    partition->set_offset(offset);
-  }
-  auto maybe_error = consumer_->assign(partitions);
-  if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
-    return fmt::format("Can't assign the offset", maybe_error);
-  }
-
-  maybe_error = consumer_->commitSync(partitions);
-  if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
-    return fmt::format("Can't commit the offset", maybe_error);
+  cb_.set_offset(offset);
+  if (const auto err = consumer_->subscribe(info_.topics); err != RdKafka::ERR_NO_ERROR) {
+    return fmt::format("Could not set offset of consumer: {}. Error: {}", info_.consumer_name, RdKafka::err2str(err));
   }
   return "";
 }
