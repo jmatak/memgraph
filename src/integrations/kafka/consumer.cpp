@@ -112,7 +112,9 @@ int64_t Message::Timestamp() const {
 }
 
 Consumer::Consumer(const std::string &bootstrap_servers, ConsumerInfo info, ConsumerFunction consumer_function)
-    : info_{std::move(info)}, consumer_function_(std::move(consumer_function)) {
+    : info_{std::move(info)},
+      consumer_function_(std::move(consumer_function)),
+      cb_(&last_assignment_, info_.consumer_name, &opt_) {
   MG_ASSERT(consumer_function_, "Empty consumer function for Kafka consumer");
   // NOLINTNEXTLINE (modernize-use-nullptr)
   if (info.batch_interval.value_or(kMinimumInterval) < kMinimumInterval) {
@@ -130,6 +132,14 @@ Consumer::Consumer(const std::string &bootstrap_servers, ConsumerInfo info, Cons
   std::string error;
 
   if (conf->set("event_cb", this, error) != RdKafka::Conf::CONF_OK) {
+    throw ConsumerFailedToInitializeException(info_.consumer_name, error);
+  }
+
+  if (conf->set("rebalance_cb", &cb_, error) != RdKafka::Conf::CONF_OK) {
+    throw ConsumerFailedToInitializeException(info_.consumer_name, error);
+  }
+
+  if (conf->set("offset_commit_cb", &commit_cb_, error) != RdKafka::Conf::CONF_OK) {
     throw ConsumerFailedToInitializeException(info_.consumer_name, error);
   }
 
@@ -376,16 +386,29 @@ void Consumer::StopConsuming() {
 }
 
 std::string Consumer::SetConsumerOffsets(const std::string_view stream_name, int64_t offset) {
-  bool expected{false};
-  if (!is_running_.compare_exchange_strong(expected, true)) {
-    return fmt::format("Can't set offset of running Stream: {}", stream_name);
+  /*
+bool expected{false};
+if (!is_running_.compare_exchange_strong(expected, true)) {
+return fmt::format("Can't set offset of running Stream: {}", stream_name);
+}
+*/
+  if (offset == -1) {
+    offset = RD_KAFKA_OFFSET_BEGINNING;
+  } else if (offset == -2) {
+    offset = RD_KAFKA_OFFSET_END;
   }
-  utils::OnScopeExit is_running_raii([&run = is_running_]() { run.store(false); });
-  std::vector<RdKafka::TopicPartition *> partitions;
-  auto maybe_error = consumer_->assignment(partitions);
-  if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
-    return fmt::format("Can't access assigned topic partitions to the consumer: {}", maybe_error);
+  if (!opt_) {
+    // try consume instead of returning
+    return "Failed";
   }
+  /*
+    cb_.set_offset(offset);
+    if (const auto err = consumer_->subscribe(info_.topics); err != RdKafka::ERR_NO_ERROR) {
+      return fmt::format("Could not set offset of consumer: {}. Error: {}", info_.consumer_name, RdKafka::err2str(err));
+    }
+    */
+  //  utils::OnScopeExit is_running_raii([&run = is_running_]() { run.store(false); });
+  auto &partitions = *opt_;
 
   if (offset == -1) {
     offset = RD_KAFKA_OFFSET_BEGINNING;
@@ -396,7 +419,7 @@ std::string Consumer::SetConsumerOffsets(const std::string_view stream_name, int
   for (auto &partition : partitions) {
     partition->set_offset(offset);
   }
-  maybe_error = consumer_->assign(partitions);
+  auto maybe_error = consumer_->assign(partitions);
   if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
     return fmt::format("Can't assign the offset", maybe_error);
   }

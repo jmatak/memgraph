@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -149,6 +150,54 @@ class Consumer final : public RdKafka::EventCb {
 
   void StopConsuming();
 
+  class ConsumerRebalanceCb : public RdKafka::RebalanceCb {
+   public:
+    ConsumerRebalanceCb(std::vector<RdKafka::TopicPartition *> *last_assignment, std::string consumer_name,
+                        std::optional<std::vector<RdKafka::TopicPartition *>> *opt)
+        : last_assignment_(last_assignment), consumer_name_(consumer_name), opt_(opt) {}
+
+    void rebalance_cb(RdKafka::KafkaConsumer *consumer, RdKafka::ErrorCode err,
+                      std::vector<RdKafka::TopicPartition *> &partitions) override {
+      *opt_ = partitions;
+      consumer->assign(partitions);
+      consumer->commitSync(partitions);
+      /*
+      if (err == RdKafka::ERR__REVOKE_PARTITIONS) {
+          consumer->unassign();
+          return;
+      }
+      */
+      /*
+       if (offset_) {
+         for (auto &partition : partitions) {
+           partition->set_offset(*offset_);
+           consumer->seek(*partition, 0);
+         }
+       }
+       auto maybe_error = consumer->assign(partitions);
+       if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
+         spdlog::warn("Assigning offset of consumer {} failed: {}", consumer_name_, RdKafka::err2str(err));
+       }
+      maybe_error = consumer->commitSync(partitions);
+     if (maybe_error != RdKafka::ErrorCode::ERR_NO_ERROR) {
+         spdlog::warn("Commiting offsets of consumer {} failed: {}", consumer_name_, RdKafka::err2str(err));
+       }
+
+       if (offset_) {
+         last_assignment_->clear();
+       }
+       */
+    }
+
+    void set_offset(int64_t offset) { offset_ = offset; }
+
+   private:
+    std::optional<int64_t> offset_;
+    std::vector<RdKafka::TopicPartition *> *last_assignment_;
+    std::optional<std::vector<RdKafka::TopicPartition *>> *opt_;
+    std::string consumer_name_;
+  };
+
   ConsumerInfo info_;
   ConsumerFunction consumer_function_;
   mutable std::atomic<bool> is_running_{false};
@@ -156,5 +205,17 @@ class Consumer final : public RdKafka::EventCb {
   std::optional<int64_t> limit_batches_{std::nullopt};
   std::unique_ptr<RdKafka::KafkaConsumer, std::function<void(RdKafka::KafkaConsumer *)>> consumer_;
   std::thread thread_;
+  ConsumerRebalanceCb cb_;
+
+  class ExampleCommitCb : public RdKafka::OffsetCommitCb {
+    void offset_commit_cb(RdKafka::ErrorCode err, std::vector<RdKafka::TopicPartition *> &offsets) override {
+      for (auto *partition : offsets) {
+        spdlog::critical("Trying to commit {}", partition->offset());
+      }
+    }
+  };
+
+  ExampleCommitCb commit_cb_;
+  std::optional<std::vector<RdKafka::TopicPartition *>> opt_;  // Protected by is_running_
 };
 }  // namespace integrations::kafka
