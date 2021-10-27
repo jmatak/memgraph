@@ -325,9 +325,9 @@ bool SharedLibraryModule::Load(const std::filesystem::path &file_path) {
   dlerror();  // Clear any existing error.
   handle_ = dlopen(file_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle_) {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    spdlog::error(
-        utils::MessageWithLink("Unable to load module {}; {}.", file_path, dlerror(), "https://memgr.ph/modules"));
+    spdlog::error(utils::MessageWithLink("Unable to load module {}; {}.", file_path, dlerror(),
+                                         "https://memgr.ph/modules"));  // NOLINT(concurrency-mt-unsafe)
+
     return false;
   }
   // Get required mgp_init_module
@@ -386,9 +386,8 @@ bool SharedLibraryModule::Close() {
     spdlog::warn("When closing module {}; mgp_shutdown_module returned {}", file_path_, shutdown_res);
   }
   if (dlclose(handle_) != 0) {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    spdlog::error(
-        utils::MessageWithLink("Failed to close module {}; {}.", file_path_, dlerror(), "https://memgr.ph/modules"));
+    spdlog::error(utils::MessageWithLink("Failed to close module {}; {}.", file_path_, dlerror(),
+                                         "https://memgr.ph/modules"));  // NOLINTN(concurrency-mt-unsafe)
     return false;
   }
   spdlog::info("Closed module {}", file_path_);
