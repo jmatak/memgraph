@@ -325,8 +325,8 @@ bool SharedLibraryModule::Load(const std::filesystem::path &file_path) {
   dlerror();  // Clear any existing error.
   handle_ = dlopen(file_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle_) {
-    spdlog::error(utils::MessageWithLink("Unable to load module {}; {}.", file_path, dlerror(),
-                                         "https://memgr.ph/modules"));  // NOLINT(concurrency-mt-unsafe)
+    spdlog::error(
+        utils::MessageWithLink("Unable to load module {}; {}.", file_path, dlerror(), "https://memgr.ph/modules"));
 
     return false;
   }
@@ -386,8 +386,8 @@ bool SharedLibraryModule::Close() {
     spdlog::warn("When closing module {}; mgp_shutdown_module returned {}", file_path_, shutdown_res);
   }
   if (dlclose(handle_) != 0) {
-    spdlog::error(utils::MessageWithLink("Failed to close module {}; {}.", file_path_, dlerror(),
-                                         "https://memgr.ph/modules"));  // NOLINTN(concurrency-mt-unsafe)
+    spdlog::error(
+        utils::MessageWithLink("Failed to close module {}; {}.", file_path_, dlerror(), "https://memgr.ph/modules"));
     return false;
   }
   spdlog::info("Closed module {}", file_path_);
@@ -645,7 +645,7 @@ void ModuleRegistry::UnloadAllModules() {
 
 utils::MemoryResource &ModuleRegistry::GetSharedMemoryResource() noexcept { return *shared_; }
 
-bool ModuleRegistry::RegisterProcedure(const std::string_view name, mgp_proc proc) {
+bool ModuleRegistry::RegisterMgProcedure(const std::string_view name, mgp_proc proc) {
   std::unique_lock<utils::RWLock> guard(lock_);
   if (auto module = modules_.find("mg"); module != modules_.end()) {
     auto *builtin_module = dynamic_cast<BuiltinModule *>(module->second.get());
